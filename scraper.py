@@ -2,185 +2,176 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from urllib.parse import urldefrag, urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
+from config import HASH_STORE_PATH
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 def find_sitemap_url(base_url: str) -> Optional[str]:
-    """
-    Автоматически находит URL карты сайта.
-
-    Сначала проверяет файл /robots.txt, затем стандартный адрес /sitemap.xml.
-
-    Args:
-        base_url: Корневой URL сайта (например, "https://delprof.ru").
-
-    Returns:
-        Найденный URL карты сайта или None, если найти не удалось.
-    """
-    logging.info(f"Поиск карты сайта для {base_url}...")
-
-    robots_url = urljoin(base_url, "/robots.txt")
+    logging.info(f'Поиск карты сайта для {base_url}...')
+    robots_url = urljoin(base_url, '/robots.txt')
     try:
-        response = requests.get(robots_url, timeout=10)
-        if response.status_code == 200:
-            for line in response.text.splitlines():
-                if line.lower().startswith("sitemap:"):
-                    sitemap_url = line.split(":", 1)[1].strip()
-                    logging.info(f"Карта сайта найдена в robots.txt: {sitemap_url}")
-                    return sitemap_url
-    except requests.RequestException as e:
-        logging.warning(f"Не удалось проверить robots.txt: {e}")
+        r = requests.get(robots_url, timeout=10)
+        if r.status_code == 200:
+            for line in r.text.splitlines():
+                if line.lower().startswith('sitemap:'):
+                    sm = line.split(':', 1)[1].strip()
+                    logging.info(f'Карта сайта найдена в robots.txt: {sm}')
+                    return sm
+    except requests.RequestException:
+        logging.warning('Не удалось получить robots.txt')
 
-    sitemap_url = urljoin(base_url, "/sitemap.xml")
+    sitemap_url = urljoin(base_url, '/sitemap.xml')
     try:
-        response = requests.head(sitemap_url, timeout=10)
-        if response.status_code == 200:
-            logging.info(f"Карта сайта найдена по стандартному адресу: {sitemap_url}")
+        h = requests.head(sitemap_url, timeout=10)
+        if h.status_code == 200:
+            logging.info(f'Карта сайта найдена по умолчанию: {sitemap_url}')
             return sitemap_url
-    except requests.RequestException as e:
-        logging.warning(f"Не удалось проверить стандартный адрес sitemap.xml: {e}")
+    except requests.RequestException:
+        pass
 
-    logging.error(f"Не удалось автоматически найти карту сайта для {base_url}")
+    logging.error(f'Карта сайта не найдена для {base_url}')
     return None
 
 
 class HashManager:
-    """Класс для управления хранилищем хэшей страниц."""
-
-    def __init__(self, storage_path: str = "hash_storage.json"):
+    def __init__(self, storage_path: Path = HASH_STORE_PATH):
         self.storage_path = Path(storage_path)
         self.hashes = self._load_hashes()
-        logging.info(f"Загружено {len(self.hashes)} существующих хэшей из {self.storage_path}")
+        logging.info(f'Загружено хэшей: {len(self.hashes)}')
 
     def _load_hashes(self) -> Dict[str, str]:
-        """Загружает хэши из JSON-файла. Возвращает пустой словарь, если файл не найден."""
+        if not self.storage_path.exists():
+            return {}
         try:
             with open(self.storage_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except FileNotFoundError:
-            return {}
-        except json.JSONDecodeError:
-            logging.warning(f"Файл {self.storage_path} поврежден. Будет создан новый.")
+        except Exception:
+            logging.warning('Файл хэшей повреждён. Начинаем заново.')
             return {}
 
     def save_hashes(self):
-        """Сохраняет текущие хэши в JSON-файл."""
         with open(self.storage_path, 'w', encoding='utf-8') as f:
-            json.dump(self.hashes, f, indent=4, ensure_ascii=False)
-        logging.info(f"Хэши ({len(self.hashes)} записей) успешно сохранены в {self.storage_path}")
+            json.dump(self.hashes, f, indent=2, ensure_ascii=False)
 
     def has_changed(self, url: str, content: str) -> bool:
-        """
-        Проверяет, изменился ли контент страницы.
-        Обновляет хэш, если страница новая или изменилась.
-
-        Returns:
-            True, если страница новая или изменилась (требуется обработка).
-            False, если страница не изменилась (можно пропустить).
-        """
-        current_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
-
-        stored_hash = self.hashes.get(url)
-
-        if stored_hash == current_hash:
+        cur = hashlib.md5(content.encode('utf-8')).hexdigest()
+        prev = self.hashes.get(url)
+        if prev == cur:
             return False
-        else:
-            self.hashes[url] = current_hash
-            return True
+        self.hashes[url] = cur
+        return True
 
 
-def parse_sitemap(sitemap_url: str, max_links: int = 20) -> list[dict[str, str | Any]] | None:
-    """
-    Парсит карту сайта, обрабатывая только новые или измененные страницы.
+def _extract_meta(soup: BeautifulSoup) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    title = soup.find('title')
+    if title and title.text:
+        meta['title'] = title.text.strip()
+    for attr in ['article:published_time', 'og:published_time', 'date', 'pubdate']:
+        tag = soup.find('meta', attrs={'property': attr}) or soup.find('meta', attrs={'name': attr})
+        if tag and tag.get('content'):
+            meta['published_at'] = tag['content']
+            break
+    return meta
 
-    Args:
-        sitemap_url: Полный URL к файлу sitemap.xml.
-        max_links: Максимальное количество самых приоритетных ссылок для проверки.
 
-    Returns:
-        Список словарей с URL и HTML-кодом только для новых или обновленных страниц.
-    """
-    results = []
+def clean_html_to_text(html_body: str, url: str) -> Tuple[str, Dict[str, Any]]:
+    soup = BeautifulSoup(html_body, 'lxml')
+    for sel in ['header', 'footer', 'nav', 'aside', 'script', 'style', 'noscript']:
+        for el in soup.select(sel):
+            el.decompose()
+
+    for tag in soup.find_all():
+        if tag.name in ['svg']:
+            tag.decompose()
+
+    meta = _extract_meta(soup)
+    meta['source'] = url
+
+    body = soup if soup.body is None else soup.body
+
+    lines: List[str] = []
+    for el in body.descendants:
+        if getattr(el, 'name', None) in ['h1', 'h2', 'h3']:
+            text = el.get_text(' ', strip=True)
+            if text:
+                lines.append('\n' + text + '\n')
+        elif getattr(el, 'name', None) in ['p', 'li']:
+            text = el.get_text(' ', strip=True)
+            if text:
+                lines.append(text)
+
+    text = '\n'.join(lines)
+    text = ' '.join(text.split())
+
+    text = text.replace('\n ', '\n')
+    return text.strip(), meta
+
+
+def parse_sitemap(sitemap_url: str, max_links: int = 20) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
     hash_manager = HashManager()
 
     try:
-        logging.info(f"Загрузка карты сайта: {sitemap_url}")
-        response = requests.get(sitemap_url, timeout=15)
-        response.raise_for_status()
+        r = requests.get(sitemap_url, timeout=15)
+        r.raise_for_status()
     except requests.RequestException as e:
-        logging.error(f"Не удалось загрузить карту сайта. Ошибка: {e}")
+        logging.error(f'Не удалось загрузить sitemap: {e}')
         return results
 
-    sitemap_soup = BeautifulSoup(response.content, "xml")
+    sm = BeautifulSoup(r.content, 'xml')
+    url_items = []
+    for u in sm.find_all('url'):
+        loc = u.find('loc')
+        pr = u.find('priority')
+        if loc:
+            priority = float(pr.text) if pr and pr.text else 0.5
+            url_items.append({'url': loc.text.strip(), 'priority': priority})
 
-    url_data = []
-    for url_entry in sitemap_soup.find_all("url"):
-        loc_tag = url_entry.find("loc")
-        priority_tag = url_entry.find("priority")
-        if loc_tag:
-            priority = float(priority_tag.text) if priority_tag and priority_tag.text else 0.5
-            url_data.append({"url": loc_tag.text.strip(), "priority": priority})
-
-    urls_to_check = sorted(url_data, key=lambda x: x['priority'], reverse=True)
-    logging.info(f"Найдено {len(urls_to_check)} ссылок. Проверка топ-{max_links} по приоритету.")
-
-    links = 0
+    url_items.sort(key=lambda x: x['priority'], reverse=True)
+    checked = 0
     i = 0
-    while links < max_links and i < len(urls_to_check):
-        page_url, _ = urldefrag(urls_to_check[i]['url'])
+    while checked < max_links and i < len(url_items):
+        page_url, _ = urldefrag(url_items[i]['url'])
+        i += 1
         try:
-            page_response = requests.get(page_url, timeout=10)
-            page_response.raise_for_status()
+            pr = requests.get(page_url, timeout=12)
+            pr.raise_for_status()
+            ps = BeautifulSoup(pr.content, 'lxml')
 
-            page_soup = BeautifulSoup(page_response.content, "lxml")
+            for selector in ['header', 'footer', 'nav', 'aside', 'script', 'style', 'noscript']:
+                for e in ps.select(selector):
+                    e.decompose()
 
-            for selector in ['header', 'footer', 'nav', 'aside', 'script', 'style']:
-                for element in page_soup.select(selector):
-                    element.decompose()
-
-            body = page_soup.body
-            if not body:
-                logging.warning(f"Тег <body> не найден на странице {page_url}. Пропускаем.")
+            body = ps.body if ps.body else ps
+            text_for_hash = body.get_text(strip=True)
+            if not text_for_hash or len(text_for_hash) < 100:
                 continue
 
-            page_text = body.get_text(separator=" ", strip=True)
-
-            if hash_manager.has_changed(page_url, page_text):
-                logging.info(f"  -> Обнаружены изменения на странице: {page_url}. Добавляем в обработку.")
-                results.append({
-                    "url": page_url,
-                    "html_body": str(body)
-                })
-                links += 1
-            else:
-                logging.info(f"  -> Страница не изменилась: {page_url}. Пропускаем.")
-
+            if hash_manager.has_changed(page_url, text_for_hash):
+                logging.info(f'Обновление/новая страница: {page_url}')
+                results.append({'url': page_url, 'html_body': str(body)})
+                checked += 1
         except requests.RequestException as e:
-            logging.error(f"   Не удалось обработать страницу {page_url}. Ошибка: {e}")
-        finally:
-            i += 1
+            logging.warning(f'Ошибка загрузки {page_url}: {e}')
 
     hash_manager.save_hashes()
-
-    logging.info(f"Обработка завершена. Найдено {len(results)} новых/обновленных страниц.")
+    logging.info(f'Найдено новых/изменённых: {len(results)}')
     return results
 
 
-if __name__ == "__main__":
-    TARGET_SITEMAP_URL = "https://delprof.ru"
-
-    print("--- Первый запуск (или после удаления hash_storage.json) ---")
-    pages_data_first_run = parse_sitemap(TARGET_SITEMAP_URL, max_links=5)
-    print(f"\nНа первом запуске обработано: {len(pages_data_first_run)} страниц.\n")
-
-    print("\n--- Второй запуск (имитация обновления без изменений на сайте) ---")
-    pages_data_second_run = parse_sitemap(TARGET_SITEMAP_URL, max_links=5)
-    print(f"\nНа втором запуске обработано: {len(pages_data_second_run)} страниц.\n")
-
-    print("Проверьте файл 'hash_storage.json', который появился в папке проекта.")
+if __name__ == '__main__':
+    base = 'https://delprof.ru'
+    sm = find_sitemap_url(base)
+    if not sm:
+        print('Sitemap не найден.')
+    else:
+        pages = parse_sitemap(sm, max_links=5)
+        print('Страниц для индексации:', len(pages))
