@@ -1,0 +1,16 @@
+aiogram
+langchain
+
+langchain-google-genai
+beautifulsoup4
+
+requests
+
+faiss-cpu
+sentence-transformers
+python-dotenv
+torch
+transformers
+accelerate
+langchain-core
+langchain-community
