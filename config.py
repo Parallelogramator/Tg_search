@@ -1,6 +1,7 @@
 # config.py
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,7 +16,7 @@ USE_GOOGLE = bool(GOOGLE_API_KEY)
 
 # --- Local models ---
 LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "google/gemma-3-4b-it")
 
 # Включить кросс-энкодер для rerank (локально)
 USE_RERANKER = os.getenv("USE_RERANKER", "true").lower() == "true"
@@ -41,9 +42,9 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Generation ---
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.3"))
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "1024"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
 
 # --- Other ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-DEFAULT_SITE = os.getenv("DEFAULT_SITE", "https://delprof.ru")
+DEFAULT_SITE = os.getenv("DEFAULT_SITE", "https://delprof.ru").strip()
 DEFAULT_UPDATE_MAX_LINKS = int(os.getenv("DEFAULT_UPDATE_MAX_LINKS", "200"))

@@ -1,10 +1,12 @@
+import asyncio
 import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urldefrag, urljoin
 
+import aiohttp
 import requests
 from bs4 import BeautifulSoup
 
@@ -69,17 +71,14 @@ class HashManager:
         return True
 
 
-def _extract_meta(soup: BeautifulSoup) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
-    title = soup.find('title')
-    if title and title.text:
-        meta['title'] = title.text.strip()
-    for attr in ['article:published_time', 'og:published_time', 'date', 'pubdate']:
-        tag = soup.find('meta', attrs={'property': attr}) or soup.find('meta', attrs={'name': attr})
-        if tag and tag.get('content'):
-            meta['published_at'] = tag['content']
-            break
-    return meta
+async def fetch(session: aiohttp.ClientSession, url: str, timeout: int = 12) -> Optional[str]:
+    try:
+        async with session.get(url, timeout=timeout) as resp:
+            resp.raise_for_status()
+            return await resp.text()
+    except Exception as e:
+        logging.warning(f'Ошибка загрузки {url}: {e}')
+        return None
 
 
 def clean_html_to_text(html_body: str, url: str) -> Tuple[str, Dict[str, Any]]:
@@ -88,15 +87,12 @@ def clean_html_to_text(html_body: str, url: str) -> Tuple[str, Dict[str, Any]]:
         for el in soup.select(sel):
             el.decompose()
 
-    for tag in soup.find_all():
-        if tag.name in ['svg']:
-            tag.decompose()
+    meta = {'source': url}
+    title = soup.find('title')
+    if title and title.text:
+        meta['title'] = title.text.strip()
 
-    meta = _extract_meta(soup)
-    meta['source'] = url
-
-    body = soup if soup.body is None else soup.body
-
+    body = soup.body if soup.body else soup
     lines: List[str] = []
     for el in body.descendants:
         if getattr(el, 'name', None) in ['h1', 'h2', 'h3']:
@@ -108,70 +104,68 @@ def clean_html_to_text(html_body: str, url: str) -> Tuple[str, Dict[str, Any]]:
             if text:
                 lines.append(text)
 
-    text = '\n'.join(lines)
-    text = ' '.join(text.split())
-
+    text = ' '.join(' '.join(lines).split())
     text = text.replace('\n ', '\n')
     return text.strip(), meta
 
 
-def parse_sitemap(sitemap_url: str, max_links: int = 20) -> List[Dict[str, Any]]:
+async def parse_sitemap(sitemap_url: str, max_links: int = 20) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     hash_manager = HashManager()
 
-    try:
-        r = requests.get(sitemap_url, timeout=15)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        logging.error(f'Не удалось загрузить sitemap: {e}')
-        return results
-
-    sm = BeautifulSoup(r.content, 'xml')
-    url_items = []
-    for u in sm.find_all('url'):
-        loc = u.find('loc')
-        pr = u.find('priority')
-        if loc:
-            priority = float(pr.text) if pr and pr.text else 0.5
-            url_items.append({'url': loc.text.strip(), 'priority': priority})
-
-    url_items.sort(key=lambda x: x['priority'], reverse=True)
-    checked = 0
-    i = 0
-    while checked < max_links and i < len(url_items):
-        page_url, _ = urldefrag(url_items[i]['url'])
-        i += 1
+    async with aiohttp.ClientSession() as session:
         try:
-            pr = requests.get(page_url, timeout=12)
-            pr.raise_for_status()
-            ps = BeautifulSoup(pr.content, 'lxml')
+            sitemap_text = await fetch(session, sitemap_url, timeout=15)
+            if not sitemap_text:
+                return results
+        except Exception as e:
+            logging.error(f'Не удалось загрузить sitemap: {e}')
+            return results
 
-            for selector in ['header', 'footer', 'nav', 'aside', 'script', 'style', 'noscript']:
-                for e in ps.select(selector):
-                    e.decompose()
+        sm = BeautifulSoup(sitemap_text, 'xml')
+        url_items = []
+        for u in sm.find_all('url'):
+            loc = u.find('loc')
+            pr = u.find('priority')
+            if loc:
+                priority = float(pr.text) if pr and pr.text else 0.5
+                url_items.append({'url': loc.text.strip(), 'priority': priority})
 
-            body = ps.body if ps.body else ps
-            text_for_hash = body.get_text(strip=True)
-            if not text_for_hash or len(text_for_hash) < 100:
-                continue
+        url_items.sort(key=lambda x: x['priority'], reverse=True)
+        url_items = url_items[:max_links]
 
-            if hash_manager.has_changed(page_url, text_for_hash):
-                logging.info(f'Обновление/новая страница: {page_url}')
-                results.append({'url': page_url, 'html_body': str(body)})
-                checked += 1
-        except requests.RequestException as e:
-            logging.warning(f'Ошибка загрузки {page_url}: {e}')
+        sem = asyncio.Semaphore(10)
+
+        async def process_page(page_url: str):
+            async with sem:
+                url_clean, _ = urldefrag(page_url)
+                html = await fetch(session, url_clean)
+                if not html:
+                    return
+                text_for_hash, meta = clean_html_to_text(html, url_clean)
+                if len(text_for_hash) < 100:
+                    return
+                if hash_manager.has_changed(url_clean, text_for_hash):
+                    logging.info(f'Обновление/новая страница: {url_clean}')
+                    results.append({'url': url_clean, 'html_body': html})
+
+        tasks = [process_page(u['url']) for u in url_items]
+        await asyncio.gather(*tasks)
 
     hash_manager.save_hashes()
-    logging.info(f'Найдено новых/изменённых: {len(results)}')
+    logging.info(f'Найдено новых/изменённых страниц: {len(results)}')
     return results
 
 
 if __name__ == '__main__':
-    base = 'https://delprof.ru'
-    sm = find_sitemap_url(base)
-    if not sm:
-        print('Sitemap не найден.')
-    else:
-        pages = parse_sitemap(sm, max_links=5)
-        print('Страниц для индексации:', len(pages))
+    async def main():
+        base = 'https://delprof.ru'
+        sm = find_sitemap_url(base)
+        if not sm:
+            print('Sitemap не найден.')
+        else:
+            pages = await parse_sitemap(sm, max_links=10)
+            print('Страниц для индексации:', len(pages))
+
+
+    asyncio.run(main())

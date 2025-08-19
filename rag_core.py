@@ -1,31 +1,27 @@
+import asyncio
 import json
-import os
-import time
 import logging
+import os
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Any
 
+import aiohttp
 from dotenv import load_dotenv
-
-from langchain_core.documents import Document
+from langchain.chains import LLMChain
+from langchain.embeddings.base import Embeddings
+from langchain.prompts import PromptTemplate
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain.embeddings.base import Embeddings
-
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-
+from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-
-from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
-
-from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 
 from config import (
     USE_GOOGLE, GOOGLE_API_KEY, LOCAL_EMBEDDING_MODEL, LOCAL_LLM_MODEL,
     TOP_K_DENSE, TOP_K_BM25, TOP_K_FUSED, CHUNK_SIZE, CHUNK_OVERLAP,
-    VECTOR_DIR, BM25_CORPUS_PATH, CACHE_DIR, TEMPERATURE, MAX_TOKENS
+    VECTOR_DIR, BM25_CORPUS_PATH, TEMPERATURE, MAX_TOKENS, DEFAULT_UPDATE_MAX_LINKS, DEFAULT_SITE
 )
 from scraper import parse_sitemap, find_sitemap_url, clean_html_to_text
 
@@ -107,7 +103,7 @@ class RAGCore:
             self.vector_store = FAISS.load_local(self.vector_store_path, self.embeddings, allow_dangerous_deserialization=True)
         else:
             logger.warning("FAISS индекс не найден. Инициализация на базе сайта по умолчанию.")
-            self.vector_store = self.create_knowledge_base(os.getenv("DEFAULT_SITE", "https://delprof.ru"))
+            asyncio.run(self.async_load())
 
         self.retriever = self.vector_store.as_retriever(search_kwargs={"k": TOP_K_DENSE})
 
@@ -130,27 +126,47 @@ class RAGCore:
 
         self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
 
-    def _prepare_documents_from_url(self, site_url: str, max_links: int | None) -> Tuple[List[Document], int]:
+    async def async_load(self):
+        self.vector_store = await self.create_knowledge_base(DEFAULT_SITE, DEFAULT_UPDATE_MAX_LINKS)
+
+    async def _fetch_page(self, session: aiohttp.ClientSession, url: str) -> Optional[Dict]:
+        try:
+            async with session.get(url, timeout=15) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+                text, meta = clean_html_to_text(html, url)
+                if not text or len(text) < 200:
+                    return None
+                doc = Document(page_content=text, metadata=meta)
+                return doc
+        except Exception as e:
+            logger.warning(f"Ошибка при загрузке {url}: {e}")
+            return None
+
+    async def _prepare_documents_from_url(self, site_url: str, max_links: int | None = 50) -> Tuple[
+        List[Document], int]:
         sitemap_url = find_sitemap_url(site_url)
         if not sitemap_url:
             raise ValueError(f"Не удалось найти карту сайта для {site_url}")
 
-        pages_data = parse_sitemap(sitemap_url, max_links=max_links or 200)
+        pages_data = await parse_sitemap(sitemap_url, max_links=max_links)
         if not pages_data:
             return [], 0
 
         docs: List[Document] = []
-        for data in pages_data:
-            text, meta = clean_html_to_text(data["html_body"], data["url"])
-            if not text or len(text) < 200:
-                continue
-            base_doc = Document(page_content=text, metadata=meta)
-            chunks = self.text_splitter.split_documents([base_doc])
-            docs.extend(chunks)
+        async with aiohttp.ClientSession() as session:
+            tasks = [self._fetch_page(session, data["url"]) for data in pages_data]
+            results = await asyncio.gather(*tasks)
+
+        for doc in results:
+            if doc:
+                chunks = self.text_splitter.split_documents([doc])
+                docs.extend(chunks)
         return docs, len(pages_data)
 
-    def create_knowledge_base(self, site_url: str, max_links: int | None = None) -> FAISS:
-        docs, page_count = self._prepare_documents_from_url(site_url, max_links)
+    async def create_knowledge_base(self, site_url: str, max_links: int | None = None) -> FAISS:
+        docs, page_count = await self._prepare_documents_from_url(site_url, max_links)
         if not docs:
             raise RAGInitializationError(f"Не удалось собрать документы для {site_url}")
 
@@ -159,11 +175,13 @@ class RAGCore:
         vs.save_local(self.vector_store_path)
         self._save_bm25_corpus(docs)
         self._build_bm25(docs)
+        self.vector_store = vs
+        self.retriever = self.vector_store.as_retriever(search_kwargs={"k": TOP_K_DENSE})
         self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
         return vs
 
-    def update_knowledge_base(self, site_url: str, max_links: int | None = None) -> str:
-        docs, page_count = self._prepare_documents_from_url(site_url, max_links)
+    async def update_knowledge_base(self, site_url: str, max_links: int | None = None) -> str:
+        docs, page_count = await self._prepare_documents_from_url(site_url, max_links)
         if not docs:
             return "База знаний уже актуальна. Новых/изменённых страниц не найдено."
 
@@ -173,6 +191,8 @@ class RAGCore:
         self._append_bm25_corpus(docs)
         self._build_bm25(self._bm25_corpus_docs)
 
+        self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
+        self.retriever = self.vector_store.as_retriever(search_kwargs={"k": TOP_K_DENSE})
         self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
         return f"Готово: добавлено {page_count} страниц, чанков: {len(docs)}."
 
@@ -249,7 +269,22 @@ class RAGCore:
             logger.warning("Rerank не выполнен (модель не доступна). Продолжаем без него.")
             return docs
 
-    def get_answer(self, query: str) -> Tuple[str, List[Dict[str, str]]]:
+    def _split_for_telegram(self, text: str, limit: int = 4096) -> list[str]:
+        """Делит текст на части для Telegram (не разрывая слова)."""
+        parts = []
+        while len(text) > limit:
+            split_pos = text.rfind("\n", 0, limit)
+            if split_pos == -1:
+                split_pos = text.rfind(" ", 0, limit)
+            if split_pos == -1:
+                split_pos = limit
+            parts.append(text[:split_pos].strip())
+            text = text[split_pos:].strip()
+        if text:
+            parts.append(text)
+        return parts
+
+    def get_answer(self, query: str) -> tuple[str, list[Any]] | tuple[list[str], list[dict[str, str]]]:
         dense_docs = self._dense_retrieve(query, TOP_K_DENSE)
         bm25_docs = self._bm25_retrieve(query, TOP_K_BM25)
 
@@ -281,7 +316,9 @@ class RAGCore:
             prompt = self.prompt.format(context=context_text, question=query)
             answer = self.llm_provider.generate(prompt)
 
-        return answer.strip(), sources
+        messages = self._split_for_telegram(answer, 3900)
+
+        return messages, sources
 
     def get_stats(self) -> Dict[str, str | int]:
         try:
