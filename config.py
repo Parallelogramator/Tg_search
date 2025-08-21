@@ -47,4 +47,4 @@ MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
 # --- Other ---
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DEFAULT_SITE = os.getenv("DEFAULT_SITE", "https://delprof.ru").strip()
-DEFAULT_UPDATE_MAX_LINKS = int(os.getenv("DEFAULT_UPDATE_MAX_LINKS", "200"))
+DEFAULT_UPDATE_MAX_LINKS = int(os.getenv("DEFAULT_UPDATE_MAX_LINKS", "10"))
