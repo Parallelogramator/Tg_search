@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, types, F
@@ -10,7 +11,6 @@ from aiogram.utils.formatting import (
     Text, Bold, Italic, Code
 )
 from dotenv import load_dotenv
-import re
 
 from config import TELEGRAM_BOT_TOKEN, LOG_LEVEL, DEFAULT_SITE, DEFAULT_UPDATE_MAX_LINKS
 from rag_core import RAGCore
@@ -143,9 +143,20 @@ async def handle_query(message: types.Message, rag_system: RAGCore):
 
     try:
         messages, sources = await asyncio.to_thread(rag_system.get_answer, user_query)
-        '''if sources:
-            src_lines = "\n".join([f"• [{s['title']}]({s['url']})" for s in sources])
-            messages[-1] += f"\n\n*Источники:*\n{src_lines}"'''
+
+        if sources:
+            source_urls = "\n".join([s['url'] for s in sources])
+            final_sources_block = f"**Источники:**\n{source_urls}"
+
+            placeholder_pattern = re.compile(r'\*\*Источники:\*\*.*', re.IGNORECASE)
+
+            last_message = messages[-1]
+
+            if placeholder_pattern.search(last_message):
+                messages[-1] = placeholder_pattern.sub(final_sources_block, last_message)
+            else:
+                messages[-1] = f"{last_message.strip()}\n\n{final_sources_block}"
+
         answer = escape_telegram_markdown(
             messages[0]
         )
@@ -155,10 +166,10 @@ async def handle_query(message: types.Message, rag_system: RAGCore):
             await thinking_message.edit_text(messages[0], disable_web_page_preview=True)
 
         for msg in messages[1:]:
-            answer = escape_telegram_markdown(
-                msg
-            )
             try:
+                answer = escape_telegram_markdown(
+                    msg
+                )
                 await message.answer(answer, disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN_V2)
             except TelegramBadRequest as e:
                 await message.answer(msg, disable_web_page_preview=True)

@@ -114,12 +114,9 @@ async def parse_sitemap(sitemap_url: str, max_links: int = 20) -> List[Dict[str,
     hash_manager = HashManager()
 
     async with aiohttp.ClientSession() as session:
-        try:
-            sitemap_text = await fetch(session, sitemap_url, timeout=15)
-            if not sitemap_text:
-                return results
-        except Exception as e:
-            logging.error(f'Не удалось загрузить sitemap: {e}')
+        sitemap_text = await fetch(session, sitemap_url, timeout=15)
+        if not sitemap_text:
+            logging.error(f'Не удалось загрузить sitemap: {sitemap_url}')
             return results
 
         sm = BeautifulSoup(sitemap_text, 'xml')
@@ -132,25 +129,25 @@ async def parse_sitemap(sitemap_url: str, max_links: int = 20) -> List[Dict[str,
                 url_items.append({'url': loc.text.strip(), 'priority': priority})
 
         url_items.sort(key=lambda x: x['priority'], reverse=True)
-        url_items = url_items[:max_links]
 
-        sem = asyncio.Semaphore(10)
+        for item in url_items:
+            if len(results) >= max_links:
+                logging.info(f"Достигнут лимит в {max_links} новых/измененных страниц.")
+                break
 
-        async def process_page(page_url: str):
-            async with sem:
-                url_clean, _ = urldefrag(page_url)
-                html = await fetch(session, url_clean)
-                if not html:
-                    return
-                text_for_hash, meta = clean_html_to_text(html, url_clean)
-                if len(text_for_hash) < 100:
-                    return
-                if hash_manager.has_changed(url_clean, text_for_hash):
-                    logging.info(f'Обновление/новая страница: {url_clean}')
-                    results.append({'url': url_clean, 'html_body': html})
+            page_url = item['url']
+            url_clean, _ = urldefrag(page_url)
+            html = await fetch(session, url_clean)
+            if not html:
+                continue
 
-        tasks = [process_page(u['url']) for u in url_items]
-        await asyncio.gather(*tasks)
+            text_for_hash, _ = clean_html_to_text(html, url_clean)
+            if len(text_for_hash) < 100:
+                continue
+
+            if hash_manager.has_changed(url_clean, text_for_hash):
+                logging.info(f'Обновление/новая страница: {url_clean}')
+                results.append({'url': url_clean, 'html_body': html})
 
     hash_manager.save_hashes()
     logging.info(f'Найдено новых/изменённых страниц: {len(results)}')

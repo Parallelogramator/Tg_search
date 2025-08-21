@@ -103,14 +103,32 @@ class RAGCore:
 
         self._bm25 = None
         self._bm25_corpus_docs = []
-        self._load_or_build_bm25_corpus()
 
         template = (
-            "Ты — вежливый и точный ИИ-ассистент. Отвечай ТОЛЬКО по контексту, без фантазий.\n"
-            "Если ответа нет в контексте — прямо скажи об этом.\n\n"
-            "Формат ответа: краткое резюме, затем структурированные пункты, затем вывод.\n"
-            "Добавь цитаты фраз (если уместно) и пометь источники в конце (я добавлю ссылки сам).\n\n"
-            "КОНТЕКСТ:\n{context}\n\nВОПРОС: {question}\n\nОТВЕТ:"
+            "Ты — вежливый и точный ИИ-ассистент, работающий в режиме Retrieval-Augmented Generation (RAG). "
+            "Твоя задача — формировать ответ строго на основе предоставленного контекста. "
+            "Контекст состоит из нескольких пронумерованных фрагментов в формате [Источник N].\n\n"
+
+            "## Правила:\n"
+            "1.  **Только контекст:** Используй исключительно информацию из предоставленных источников.\n"
+            "2.  **Обработка отсутствия ответа:** Если ответа нет в контексте — прямо напиши: 'В предоставленных материалах нет информации по вашему вопросу.' и больше ничего не добавляй.\n"
+            "3.  **Без повторов:** Избегай повторения одних и тех же фактов.\n"
+            "4.  **Анализ противоречий:** Если в разных источниках есть противоречивая информация — отметь это явно.\n\n"
+
+            "## Формат ответа:\n"
+            "1.  **Краткое резюме:** 1–2 предложения, дающие прямой ответ на вопрос.\n"
+            "2.  **Ключевые моменты:** Детальная информация в виде маркированного списка (`-`).\n"
+            "3.  **Вывод:** Обобщение и итог, не более одного абзаца.\n\n"
+
+            "## Правила цитирования:\n"
+            "- После **каждого факта, тезиса или прямой цитаты**, взятых из контекста, **обязательно** указывай номер источника в формате [N].\n"
+            "- Прямые цитаты заключай в кавычки.\n"
+            "- Если один тезис основан на нескольких источниках, перечисли их: [1, 3].\n"
+            "- В самом конце ответа добавь строку: **Источники:** .\n\n"
+
+            "--- КОНТЕКСТ ---\n{context}\n\n"
+            "--- ВОПРОС ---\n{question}\n\n"
+            "--- ОТВЕТ ---"
         )
         self.prompt = PromptTemplate(template=template, input_variables=["context", "question"])
         if self.llm_provider.mode == "google":
@@ -118,7 +136,7 @@ class RAGCore:
         else:
             self.llm_chain = None
 
-        self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
+        self._last_updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
     @classmethod
     async def create(cls, vector_store_path: str = str(VECTOR_DIR)):
@@ -190,7 +208,7 @@ class RAGCore:
         self._build_bm25(docs)
         self.vector_store = vs
         self.retriever = self.vector_store.as_retriever(search_kwargs={"k": TOP_K_DENSE})
-        self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
+        self._last_updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         return vs
 
     async def update_knowledge_base(self, site_url: str, max_links: int | None = None) -> str:
@@ -204,9 +222,9 @@ class RAGCore:
         self._append_bm25_corpus(docs)
         self._build_bm25(self._bm25_corpus_docs)
 
-        self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
+        self._last_updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         self.retriever = self.vector_store.as_retriever(search_kwargs={"k": TOP_K_DENSE})
-        self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
+        self._last_updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         return f"Готово: добавлено {page_count} страниц, чанков: {len(docs)}."
 
 
