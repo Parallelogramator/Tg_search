@@ -89,6 +89,8 @@ class RAGCore:
         if USE_GOOGLE and not GOOGLE_API_KEY:
             raise RAGInitializationError("Указан режим Google, но GOOGLE_API_KEY отсутствует.")
         self.vector_store_path = vector_store_path
+        self.vector_store = None
+        self.retriever = None
 
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
@@ -98,14 +100,6 @@ class RAGCore:
         self.embeddings = HybridEmbeddings()
         self.llm_provider = HybridLLM()
 
-        if os.path.exists(self.vector_store_path):
-            logger.info("Загрузка FAISS индекса...")
-            self.vector_store = FAISS.load_local(self.vector_store_path, self.embeddings, allow_dangerous_deserialization=True)
-        else:
-            logger.warning("FAISS индекс не найден. Инициализация на базе сайта по умолчанию.")
-            asyncio.run(self.async_load())
-
-        self.retriever = self.vector_store.as_retriever(search_kwargs={"k": TOP_K_DENSE})
 
         self._bm25 = None
         self._bm25_corpus_docs = []
@@ -125,6 +119,25 @@ class RAGCore:
             self.llm_chain = None
 
         self._last_updated = datetime.utcnow().isoformat(timespec='seconds')
+
+    @classmethod
+    async def create(cls, vector_store_path: str = str(VECTOR_DIR)):
+        """Асинхронно создает и инициализирует экземпляр RAGCore."""
+        instance = cls(vector_store_path)
+
+        if os.path.exists(instance.vector_store_path):
+            logger.info("Загрузка FAISS индекса...")
+            instance.vector_store = FAISS.load_local(
+                instance.vector_store_path, instance.embeddings, allow_dangerous_deserialization=True
+            )
+        else:
+            logger.warning("FAISS индекс не найден. Инициализация на базе сайта по умолчанию.")
+            await instance.async_load()
+
+        instance.retriever = instance.vector_store.as_retriever(search_kwargs={"k": TOP_K_DENSE})
+        instance._load_or_build_bm25_corpus()
+
+        return instance
 
     async def async_load(self):
         self.vector_store = await self.create_knowledge_base(DEFAULT_SITE, DEFAULT_UPDATE_MAX_LINKS)
