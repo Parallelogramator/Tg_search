@@ -13,7 +13,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
-    
+
 EXPOSE 8080
 
-CMD ["python", "-m", "main"]
+CMD ["python", "main"]
