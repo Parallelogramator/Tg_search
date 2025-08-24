@@ -49,9 +49,10 @@ HELP_TEXT = Text(
     "/help", " — эта справка\n",
     "/update <url> [max]", " — обновить базу знаний\n",
     "/stats", " — статистика базы\n",
+    "/restart", " — перезапуск RAG-системы\n",
     "/ping", " — проверка доступности\n\n",
     "По умолчанию источник: ", Italic(DEFAULT_SITE), "\n",
-    "Просто задайте вопрос текстом — я найду ответ в базе\."
+    "Просто задайте вопрос текстом — я найду ответ в базе."
 )
 
 
@@ -93,6 +94,22 @@ async def stats_handler(message: types.Message, rag_system: RAGCore):
     )
 
     await message.answer(content.as_markdown(), parse_mode=ParseMode.MARKDOWN_V2)
+
+
+@dp.message(Command("restart"))
+async def stats_handler(message: types.Message, rag_system: RAGCore):
+    thinking_message = await message.answer("Начинаю перезапуск RAG-системы.")
+    try:
+        rag_system = await RAGCore.create()
+        logging.info("RAG-система успешно инициализирована.")
+        await thinking_message.edit_text("RAG-система успешно инициализирована.")
+    except Exception as e:
+        logging.exception("Критическая ошибка при инициализации RAG-системы")
+        rag_system = None
+        await thinking_message.edit_text(f"❌ Сервис недоступен.\n{e}")
+
+    dp["rag_system"] = rag_system
+
 
 
 @dp.message(Command("update"))
